@@ -9,6 +9,41 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+.Python
+pyvenv.cfg
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Backend specific
+backend/__pycache__/
+backend/.env
+backend/venv/
+
+# Frontend specific
+frontend/.env
+frontend/node_modules/
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # testing
 /coverage
