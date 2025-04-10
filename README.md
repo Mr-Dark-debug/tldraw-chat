@@ -6,7 +6,8 @@ A powerful interactive diagramming and chat application that combines AI-powered
 
 TLDraw Chat is a full-stack application that enables users to communicate with an AI assistant while creating and manipulating diagrams in real-time. The application integrates TLDraw's powerful diagramming tools with a robust AI backend, allowing users to generate diagrams through natural language prompts, manipulate them interactively, and collaborate on visual content.
 
-![TLDraw Chat Interface](![image](https://github.com/user-attachments/assets/295f5004-945c-44c3-baf4-c860b4346e78))
+![TLDraw Chat Interface](https://github.com/user-attachments/assets/119d6aa9-e33e-4621-9ac0-303c78c509d4)
+
 *TLDraw Chat interface showing a diagram generation example with the AI assistant*
 
 ## Features
