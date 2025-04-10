@@ -1,15 +1,12 @@
 import os
 import sys
+import logging
 import uvicorn
 from dotenv import load_dotenv
-import logging
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s:%(name)s:%(message)s'
-)
-logger = logging.getLogger("__main__")
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Load environment variables
 load_dotenv()

@@ -78,49 +78,60 @@ export function ChatInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const ws = useRef<ExtendedWebSocket | null>(null);
-  const clientId = useRef<string>(uuidv4());
+  const clientId = useRef<string>('');
 
   // Mark component as mounted for client-side rendering only
   useEffect(() => {
     setIsMounted(true);
     
-    // Client-side only code - initialize clientId ref if needed
-    if (!clientId.current) {
+    // Client-side only code - initialize clientId ref
+    if (typeof window !== 'undefined') {
       clientId.current = uuidv4();
-    }
-    
-    // Load saved messages from localStorage
-    try {
-      const savedMessages = localStorage.getItem('tldraw-chat-messages');
-      if (savedMessages) {
-        const parsedMessages = JSON.parse(savedMessages);
-        // Convert timestamps back to Date objects
-        const formattedMessages = parsedMessages.map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp),
-        }));
-        setMessages(formattedMessages);
-      }
-    } catch (e) {
-      console.error("Error loading messages from localStorage:", e);
-    }
-    
-    // Fetch available models from the backend
-    fetch('http://127.0.0.1:8000/models')
-      .then(response => response.json())
-      .then(data => {
-        if (data && Array.isArray(data)) {
-          setAvailableModels(data);
+      
+      // Load saved messages from localStorage
+      try {
+        const savedMessages = localStorage.getItem('tldraw-chat-messages');
+        if (savedMessages) {
+          const parsedMessages = JSON.parse(savedMessages);
+          // Convert timestamps back to Date objects
+          const formattedMessages = parsedMessages.map((msg: any) => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp),
+          }));
+          setMessages(formattedMessages);
         }
-      })
-      .catch(error => {
-        console.error('Error fetching available models:', error);
-      });
+      } catch (e) {
+        console.error("Error loading messages from localStorage:", e);
+      }
+      
+      // Fetch available models from the backend
+      fetch('http://127.0.0.1:8000/models')
+        .then(response => response.json())
+        .then(data => {
+          if (data && Array.isArray(data)) {
+            setAvailableModels(data);
+          }
+        })
+        .catch(error => {
+          console.error('Error fetching available models:', error);
+        });
+    }
+    
+    return () => {
+      // Clean up WebSocket on component unmount
+      if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
+        try {
+          ws.current.close();
+        } catch (err) {
+          console.error("Error closing WebSocket connection:", err);
+        }
+      }
+    };
   }, []);
 
   // Function to establish WebSocket connection
   const connectWebSocket = useCallback(() => {
-    if (!isMounted) return; // Avoid WebSocket connection during SSR
+    if (!isMounted || typeof WebSocket === 'undefined') return; // Avoid WebSocket connection during SSR
     if (ws.current?.readyState === WebSocket.OPEN) return;
     
     setIsConnecting(true);
@@ -260,11 +271,7 @@ export function ChatInterface() {
         console.log('Updated agent details:', details);
         
         // Store messages in localStorage for persistence
-        try {
-          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
-        } catch (e) {
-          console.error("Error storing messages in localStorage:", e);
-        }
+        saveMessagesToLocalStorage(updatedMessages);
       } else if (data.type === 'model_list') {
         // Process model list response
         setAvailableModels(data.models || []);
@@ -323,11 +330,7 @@ export function ChatInterface() {
           const updatedMessages = [...filteredMessages, newMessage];
           
           // Store in localStorage for persistence
-          try {
-            localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
-          } catch (e) {
-            console.error("Error storing messages in localStorage:", e);
-          }
+          saveMessagesToLocalStorage(updatedMessages);
           
           return updatedMessages;
         });
@@ -339,12 +342,14 @@ export function ChatInterface() {
 
   // Generate a diagram from AI instructions
   const generateDiagramFromInstructions = (response: any) => {
+    if (!isMounted || typeof window === 'undefined') return false;
+    
     try {
       console.log('Generating diagram from response:', response);
       
       if (!response || typeof response !== 'object') {
         console.error('Invalid response format for diagram generation');
-        return;
+        return false;
       }
 
       // Try to extract diagram instructions from the agent response
@@ -352,34 +357,42 @@ export function ChatInterface() {
       let visualization = '';
       
       // Check if there's a dedicated visualization section
-      if (response.visualization) {
+      if (response.visualization && typeof response.visualization === 'string') {
         visualization = response.visualization;
+        console.log('Found visualization data:', visualization.substring(0, 100) + '...');
       } else if (response.text && typeof response.text === 'string') {
         // Try to extract from regular text response
         const visualizationMatch = response.text.match(/visualization:(.*?)(?=(##|\n\n|$))/i);
         if (visualizationMatch && visualizationMatch[1]) {
           visualization = visualizationMatch[1].trim();
+          console.log('Extracted visualization from text:', visualization.substring(0, 100) + '...');
         }
       }
       
       // Extract instructions from content or text
-      if (response.instructions) {
+      if (response.instructions && typeof response.instructions === 'string') {
         instructions = response.instructions;
+        console.log('Found instructions data:', instructions.substring(0, 100) + '...');
       } else if (response.content && typeof response.content === 'string') {
         instructions = response.content;
+        console.log('Using content as instructions:', instructions.substring(0, 100) + '...');
       } else if (response.text && typeof response.text === 'string') {
         instructions = response.text;
+        console.log('Using text as instructions:', instructions.substring(0, 100) + '...');
         
         // Try to extract specific diagram section if it exists
         const diagramMatch = response.text.match(/diagram:(.*?)(?=(##|\n\n|$))/i);
         if (diagramMatch && diagramMatch[1]) {
           instructions = diagramMatch[1].trim();
+          console.log('Extracted diagram instructions from text:', instructions.substring(0, 100) + '...');
         }
       }
       
       if (!instructions && !visualization) {
         console.warn('No instructions or visualization found in agent response');
-        return;
+        // Create at least minimal instructions
+        instructions = "Create a simple diagram with a central node labeled 'Main Concept'";
+        console.log('Using fallback minimal instructions');
       }
       
       // Ensure we have a non-empty instructions object
@@ -396,20 +409,23 @@ export function ChatInterface() {
       
       console.log('Sending diagram instruction message:', drawMessage);
       
-      // Use window.postMessage for better compatibility
-      window.postMessage(drawMessage, window.location.origin);
-      
-      // Also try direct event dispatch for compatibility
+      // First try direct event dispatch for better compatibility
       try {
         const event = new CustomEvent('tlDrawDiagram', { detail: drawMessage });
         window.dispatchEvent(event);
+        console.log('Dispatched tlDrawDiagram custom event');
       } catch (e) {
         console.error('Error dispatching custom event:', e);
       }
       
-      console.log('Diagram instruction message dispatched');
+      // Also use window.postMessage as fallback
+      window.postMessage(drawMessage, window.location.origin);
+      console.log('Sent postMessage with diagram instructions');
+      
+      return true; // Indicate successful dispatch
     } catch (error) {
       console.error('Error generating diagram from instructions:', error);
+      return false;
     }
   };
 
@@ -420,37 +436,37 @@ export function ChatInterface() {
 
   // Connect to WebSocket on component mount or when mode changes
   useEffect(() => {
-    if (isMounted) {
-      // Close existing connection if switching endpoints
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        try {
-          ws.current.close();
-        } catch (e) {
-          console.error("Error closing WebSocket connection:", e);
-        }
+    if (!isMounted) return;
+    
+    // Close existing connection if switching endpoints
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      try {
+        ws.current.close();
+      } catch (e) {
+        console.error("Error closing WebSocket connection:", e);
       }
-      
-      // Add a small delay before reconnecting to avoid rapid connection attempts
-      const reconnectTimer = setTimeout(() => {
-        connectWebSocket();
-      }, 500);
-      
-      return () => {
-        clearTimeout(reconnectTimer);
-      };
     }
     
-    // Cleanup function to close WebSocket connection
+    // Add a small delay before reconnecting to avoid rapid connection attempts
+    const reconnectTimer = setTimeout(() => {
+      connectWebSocket();
+    }, 500);
+    
     return () => {
-      if (ws.current) {
-        try {
-          ws.current.close();
-        } catch (e) {
-          console.error("Error closing WebSocket connection:", e);
-        }
-      }
+      clearTimeout(reconnectTimer);
     };
   }, [connectWebSocket, isMounted, currentMode]);
+
+  // Function to save messages to localStorage
+  const saveMessagesToLocalStorage = (messagesToSave: Message[]) => {
+    if (!isMounted || typeof window === 'undefined') return;
+    
+    try {
+      localStorage.setItem('tldraw-chat-messages', JSON.stringify(messagesToSave));
+    } catch (e) {
+      console.error("Error storing messages in localStorage:", e);
+    }
+  };
 
   // Handle key down event for input
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -480,7 +496,7 @@ export function ChatInterface() {
 
   // Function to send message via WebSocket
   const sendMessage = (text: string) => {
-    if (!text.trim() || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+    if (!isMounted || !text.trim() || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
     
     // Parse any command in the text
     const parsedText = parseCommand(text);
@@ -512,11 +528,7 @@ export function ChatInterface() {
       setMessages((prevMessages) => {
         const updatedMessages = [...prevMessages, userMessage];
         // Store in localStorage for persistence
-        try {
-          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
-        } catch (e) {
-          console.error("Error storing messages in localStorage:", e);
-        }
+        saveMessagesToLocalStorage(updatedMessages);
         return updatedMessages;
       });
       
@@ -536,11 +548,7 @@ export function ChatInterface() {
           
           setMessages((prevMessages) => {
             const updatedMessages = [...prevMessages, timeoutMessage];
-            try {
-              localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
-            } catch (e) {
-              console.error("Error storing messages in localStorage:", e);
-            }
+            saveMessagesToLocalStorage(updatedMessages);
             return updatedMessages;
           });
           
@@ -573,11 +581,7 @@ export function ChatInterface() {
       
       setMessages((prevMessages) => {
         const updatedMessages = [...prevMessages, errorMessage];
-        try {
-          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
-        } catch (e) {
-          console.error("Error storing messages in localStorage:", e);
-        }
+        saveMessagesToLocalStorage(updatedMessages);
         return updatedMessages;
       });
     }
@@ -765,6 +769,15 @@ export function ChatInterface() {
       setMessages((prevMessages) => [...prevMessages, aiMessage]);
     }
   };
+
+  // Return loading state if not mounted
+  if (!isMounted) {
+    return (
+      <div className="flex items-center justify-center h-full bg-gray-50">
+        <div className="p-4 text-gray-500">Loading chat interface...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-white border-l shadow-sm">

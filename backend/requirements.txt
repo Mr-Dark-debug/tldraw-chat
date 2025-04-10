@@ -9,3 +9,4 @@ google-generativeai
 requests
 groq
 tavily-python
+flask

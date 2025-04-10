@@ -13,6 +13,7 @@ import asyncio
 from ai_service import ai_service
 from agent_system import AgentSystem, AIProvider
 from web_search_service import web_search_service
+from routes.diagram_routes import router as diagram_router
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +35,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include our diagram router
+app.include_router(diagram_router)
 
 # Connection manager for WebSockets
 class ConnectionManager:

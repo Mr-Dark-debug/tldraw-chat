@@ -13,6 +13,15 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 class AIService:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        """Get or create a singleton instance of AIService for dependency injection"""
+        if cls._instance is None:
+            cls._instance = AIService()
+        return cls._instance
+
     def __init__(self):
         # Initialize OpenAI client with API key
         self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
