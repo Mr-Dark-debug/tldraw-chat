@@ -36,6 +36,22 @@ interface ModelInfo {
   displayName: string;
 }
 
+// Interface for agent processing details
+interface AgentDetails {
+  id: string;
+  original_message?: string;
+  enhanced_prompt?: string;
+  research?: string;
+  visualization?: string;
+  instructions?: string;
+  response?: string;
+}
+
+// Extended WebSocket interface to include responseTimeout
+interface ExtendedWebSocket extends WebSocket {
+  responseTimeout?: NodeJS.Timeout;
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -43,7 +59,7 @@ export function ChatInterface() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   const [useAgentSystem, setUseAgentSystem] = useState(true);
-  const [agentDetails, setAgentDetails] = useState<any>(null);
+  const [agentDetails, setAgentDetails] = useState<AgentDetails | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [currentMode, setCurrentMode] = useState<'chat' | 'create'>('chat');
   const [showModelSelector, setShowModelSelector] = useState(false);
@@ -61,12 +77,33 @@ export function ChatInterface() {
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const ws = useRef<WebSocket | null>(null);
+  const ws = useRef<ExtendedWebSocket | null>(null);
   const clientId = useRef<string>(uuidv4());
 
   // Mark component as mounted for client-side rendering only
   useEffect(() => {
     setIsMounted(true);
+    
+    // Client-side only code - initialize clientId ref if needed
+    if (!clientId.current) {
+      clientId.current = uuidv4();
+    }
+    
+    // Load saved messages from localStorage
+    try {
+      const savedMessages = localStorage.getItem('tldraw-chat-messages');
+      if (savedMessages) {
+        const parsedMessages = JSON.parse(savedMessages);
+        // Convert timestamps back to Date objects
+        const formattedMessages = parsedMessages.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp),
+        }));
+        setMessages(formattedMessages);
+      }
+    } catch (e) {
+      console.error("Error loading messages from localStorage:", e);
+    }
     
     // Fetch available models from the backend
     fetch('http://127.0.0.1:8000/models')
@@ -102,12 +139,17 @@ export function ChatInterface() {
       if (ws.current) {
         // Close any existing connection first
         if (ws.current.readyState !== WebSocket.CLOSED) {
-          ws.current.close();
+          try {
+            ws.current.close();
+          } catch (e) {
+            console.error("Error closing existing WebSocket:", e);
+          }
         }
         ws.current = null;
       }
       
       const socket = new WebSocket(wsUrl);
+      ws.current = socket;
       
       socket.onopen = () => {
         console.log('WebSocket connection established');
@@ -116,149 +158,20 @@ export function ChatInterface() {
       };
       
       socket.onmessage = (event) => {
-        try {
-          // Parse the message data
-          const data = JSON.parse(event.data);
-          
-          if (Array.isArray(data)) {
-            // This is the message history
-            const formattedMessages = data.map((msg) => ({
-              ...msg,
-              timestamp: new Date(msg.timestamp * 1000), // Convert timestamp to Date
-            }));
-            setMessages(formattedMessages);
-          } else if (data.type === 'agent_response') {
-            // This is a detailed agent response
-            setIsProcessing(false);
-            
-            // Clean up any error messages for better presentation
-            const cleanErrorMessages = (text: string) => {
-              if (text && text.includes('Error generating text with')) {
-                return "Sorry, I encountered an API error. I'll still try to help you with what I know.";
-              }
-              return text || '';
-            };
-            
-            // Clean up the content for display
-            const enhancedPrompt = cleanErrorMessages(data.enhanced_prompt);
-            const research = cleanErrorMessages(data.research);
-            const visualization = cleanErrorMessages(data.visualization);
-            const instructions = cleanErrorMessages(data.instructions);
-            const response = cleanErrorMessages(data.response);
-            
-            // Create a new AI message if one doesn't exist for this response
-            const messageExists = messages.some(msg => msg.id === data.id);
-            
-            if (!messageExists) {
-              const newMessage = {
-                id: data.id,
-                text: response,
-                sender: 'assistant' as const,
-                timestamp: new Date(data.timestamp * 1000),
-                mode: currentMode,
-              };
-              
-              setMessages(prevMessages => [...prevMessages, newMessage]);
-            }
-            
-            setAgentDetails({
-              id: data.id,
-              originalMessage: data.original_message,
-              enhancedPrompt: enhancedPrompt,
-              research: research,
-              visualization: visualization,
-              instructions: instructions,
-              response: response,
-              timestamp: new Date(data.timestamp * 1000)
-            });
-
-            // Only show error info in console for debugging
-            if ((data.enhanced_prompt && data.enhanced_prompt.includes('Error')) || 
-                (data.research && data.research.includes('Error')) ||
-                (data.visualization && data.visualization.includes('Error')) ||
-                (data.instructions && data.instructions.includes('Error'))) {
-              console.warn("Agent encountered errors:", {
-                enhancedPrompt: data.enhanced_prompt,
-                research: data.research,
-                visualization: data.visualization,
-                instructions: data.instructions
-              });
-            }
-          } else if (data.type === 'model_list') {
-            // Process model list response
-            setAvailableModels(data.models || []);
-          } else if (data.type === 'processing_update') {
-            // Process status update from backend
-            const statusMessage = {
-              id: uuidv4(),
-              text: `${data.status}...`,
-              sender: 'assistant' as const,
-              timestamp: new Date(),
-              isStatusUpdate: true
-            };
-            
-            setMessages((prevMessages) => {
-              // Remove any previous status updates
-              const filteredMessages = prevMessages.filter((msg: any) => !msg.isStatusUpdate);
-              return [...filteredMessages, statusMessage];
-            });
-          } else if (data.type === 'error') {
-            // Handle error message
-            console.error('Server error:', data.content);
-            const errorMessage = {
-              id: uuidv4(),
-              text: data.content || "An error occurred while processing your request.",
-              sender: 'assistant' as const,
-              timestamp: new Date(),
-              mode: currentMode,
-            };
-            
-            setMessages(prevMessages => [...prevMessages, errorMessage]);
-            setIsProcessing(false);
-          } else {
-            // This is a single message
-            setIsProcessing(false);
-            let messageText = data.text;
-            
-            // Clean up any error messages in regular messages
-            if (messageText && messageText.includes('Error generating text with')) {
-              messageText = "I encountered an issue with one of my services, but I'll still try to help.";
-            }
-            
-            const newMessage = {
-              ...data,
-              text: messageText,
-              timestamp: new Date(data.timestamp * 1000),
-              mode: data.mode || currentMode,
-            };
-            
-            setMessages((prevMessages) => {
-              // Check if the message already exists
-              const exists = prevMessages.some((msg) => msg.id === newMessage.id);
-              if (exists) return prevMessages;
-              
-              // Filter out status update messages
-              const filteredMessages = prevMessages.filter((msg: any) => !msg.isStatusUpdate);
-              return [...filteredMessages, newMessage];
-            });
-          }
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
+        handleSocketMessage(event);
       };
       
       socket.onclose = (event) => {
-        console.log(`WebSocket closed with code: ${event.code}, reason: ${event.reason}`);
+        console.log(`WebSocket connection closed: ${event.code} ${event.reason}`);
         setIsConnected(false);
         setIsConnecting(false);
         
-        // Only attempt to reconnect if the connection was not closed intentionally
-        // and if the component is still mounted
-        if (event.code !== 1000 && isMounted) {
-          console.log('Attempting to reconnect in 3 seconds...');
+        // Auto-reconnect after a delay, but only if the socket wasn't closed deliberately
+        if (!event.wasClean) {
+          console.log('Connection closed unexpectedly, reconnecting in 5 seconds...');
           setTimeout(() => {
-            if (isMounted) connectWebSocket();
-          }, 3000);
+            connectWebSocket();
+          }, 5000);
         }
       };
       
@@ -268,41 +181,276 @@ export function ChatInterface() {
         setIsConnecting(false);
       };
       
-      ws.current = socket;
-    } catch (error) {
-      console.error('Error creating WebSocket connection:', error);
+    } catch (e) {
+      console.error("Error creating WebSocket:", e);
       setIsConnected(false);
       setIsConnecting(false);
-      
-      // Try to reconnect after a delay
-      setTimeout(() => {
-        if (isMounted) connectWebSocket();
-      }, 5000);
     }
-  }, [isMounted, currentMode, clientId, messages]);
+  }, [isMounted, currentMode]);
+
+  // Handle incoming WebSocket messages
+  const handleSocketMessage = (event: MessageEvent) => {
+    try {
+      // Clear any response timeout when we receive a message
+      if (ws.current?.responseTimeout) {
+        clearTimeout(ws.current.responseTimeout);
+        ws.current.responseTimeout = undefined;
+      }
+      
+      // Parse the message data
+      const data = JSON.parse(event.data);
+      
+      // Handle ping messages from server to keep connection alive
+      if (data.type === 'ping') {
+        // Send pong response back to the server
+        try {
+          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            ws.current.send(JSON.stringify({
+              type: 'pong',
+              timestamp: Date.now() / 1000
+            }));
+          }
+        } catch (e) {
+          console.error('Error sending pong:', e);
+        }
+        return; // Don't process pings further
+      }
+      
+      console.log('Received message:', data);
+      
+      if (data.type === 'agent_response') {
+        // This is a detailed agent response
+        setIsProcessing(false);
+        
+        // Create a message ID for the response
+        const messageId = data.id || uuidv4();
+        
+        // Process agent response and create diagram if in create mode
+        if (currentMode === 'create') {
+          // Pass the entire data object to generateDiagramFromInstructions
+          generateDiagramFromInstructions(data);
+        }
+        
+        // Update UI with the response
+        const aiMessageData: Message = {
+          id: messageId,
+          text: data.response,
+          sender: 'assistant',
+          timestamp: new Date(data.timestamp * 1000 || Date.now()),
+          mode: currentMode
+        };
+        
+        // Add message to our state
+        const updatedMessages = [...messages, aiMessageData];
+        setMessages(updatedMessages);
+        
+        // Create agent details object with all required fields
+        const details: AgentDetails = {
+          id: messageId,
+          original_message: data.original_message || '',
+          enhanced_prompt: data.enhanced_prompt || '',
+          research: data.research || '',
+          visualization: data.visualization || '',
+          instructions: data.instructions || '',
+          response: data.response || ''
+        };
+        
+        // Update agent details for UI
+        setAgentDetails(details);
+        console.log('Updated agent details:', details);
+        
+        // Store messages in localStorage for persistence
+        try {
+          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
+        } catch (e) {
+          console.error("Error storing messages in localStorage:", e);
+        }
+      } else if (data.type === 'model_list') {
+        // Process model list response
+        setAvailableModels(data.models || []);
+      } else if (data.type === 'processing_update') {
+        // Process status update from backend
+        const statusMessage = {
+          id: uuidv4(),
+          text: `${data.status}...`,
+          sender: 'assistant' as const,
+          timestamp: new Date(),
+          isStatusUpdate: true
+        };
+        
+        setMessages((prevMessages) => {
+          // Remove any previous status updates
+          const filteredMessages = prevMessages.filter((msg: any) => !msg.isStatusUpdate);
+          return [...filteredMessages, statusMessage];
+        });
+      } else if (data.type === 'error') {
+        // Handle error message
+        console.error('Server error:', data.content);
+        const errorMessage = {
+          id: uuidv4(),
+          text: data.content || "An error occurred while processing your request.",
+          sender: 'assistant' as const,
+          timestamp: new Date(),
+          mode: currentMode,
+        };
+        
+        setMessages(prevMessages => [...prevMessages, errorMessage]);
+        setIsProcessing(false);
+      } else {
+        // This is a single message
+        setIsProcessing(false);
+        let messageText = data.text;
+        
+        // Clean up any error messages in regular messages
+        if (messageText && messageText.includes('Error generating text with')) {
+          messageText = "I encountered an issue with one of my services, but I'll still try to help.";
+        }
+        
+        const newMessage = {
+          ...data,
+          text: messageText,
+          timestamp: new Date(data.timestamp * 1000),
+          mode: data.mode || currentMode,
+        };
+        
+        setMessages((prevMessages) => {
+          // Check if the message already exists
+          const exists = prevMessages.some((msg) => msg.id === newMessage.id);
+          if (exists) return prevMessages;
+          
+          // Filter out status update messages
+          const filteredMessages = prevMessages.filter((msg: any) => !msg.isStatusUpdate);
+          const updatedMessages = [...filteredMessages, newMessage];
+          
+          // Store in localStorage for persistence
+          try {
+            localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
+          } catch (e) {
+            console.error("Error storing messages in localStorage:", e);
+          }
+          
+          return updatedMessages;
+        });
+      }
+    } catch (e) {
+      console.error('Error handling WebSocket message:', e);
+    }
+  };
+
+  // Generate a diagram from AI instructions
+  const generateDiagramFromInstructions = (response: any) => {
+    try {
+      console.log('Generating diagram from response:', response);
+      
+      if (!response || typeof response !== 'object') {
+        console.error('Invalid response format for diagram generation');
+        return;
+      }
+
+      // Try to extract diagram instructions from the agent response
+      let instructions = '';
+      let visualization = '';
+      
+      // Check if there's a dedicated visualization section
+      if (response.visualization) {
+        visualization = response.visualization;
+      } else if (response.text && typeof response.text === 'string') {
+        // Try to extract from regular text response
+        const visualizationMatch = response.text.match(/visualization:(.*?)(?=(##|\n\n|$))/i);
+        if (visualizationMatch && visualizationMatch[1]) {
+          visualization = visualizationMatch[1].trim();
+        }
+      }
+      
+      // Extract instructions from content or text
+      if (response.instructions) {
+        instructions = response.instructions;
+      } else if (response.content && typeof response.content === 'string') {
+        instructions = response.content;
+      } else if (response.text && typeof response.text === 'string') {
+        instructions = response.text;
+        
+        // Try to extract specific diagram section if it exists
+        const diagramMatch = response.text.match(/diagram:(.*?)(?=(##|\n\n|$))/i);
+        if (diagramMatch && diagramMatch[1]) {
+          instructions = diagramMatch[1].trim();
+        }
+      }
+      
+      if (!instructions && !visualization) {
+        console.warn('No instructions or visualization found in agent response');
+        return;
+      }
+      
+      // Ensure we have a non-empty instructions object
+      const instructionsObj = {
+        instructions: instructions || "Create a simple diagram with shapes and connections",
+        visualization: visualization || ""
+      };
+      
+      // Send message to TldrawWrapper to create the diagram
+      const drawMessage = {
+        type: 'draw_diagram',
+        instructions: instructionsObj
+      };
+      
+      console.log('Sending diagram instruction message:', drawMessage);
+      
+      // Use window.postMessage for better compatibility
+      window.postMessage(drawMessage, window.location.origin);
+      
+      // Also try direct event dispatch for compatibility
+      try {
+        const event = new CustomEvent('tlDrawDiagram', { detail: drawMessage });
+        window.dispatchEvent(event);
+      } catch (e) {
+        console.error('Error dispatching custom event:', e);
+      }
+      
+      console.log('Diagram instruction message dispatched');
+    } catch (error) {
+      console.error('Error generating diagram from instructions:', error);
+    }
+  };
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    scrollToBottom(messagesEndRef);
+  }, [messages]);
 
   // Connect to WebSocket on component mount or when mode changes
   useEffect(() => {
     if (isMounted) {
       // Close existing connection if switching endpoints
       if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.close();
+        try {
+          ws.current.close();
+        } catch (e) {
+          console.error("Error closing WebSocket connection:", e);
+        }
       }
-      connectWebSocket();
+      
+      // Add a small delay before reconnecting to avoid rapid connection attempts
+      const reconnectTimer = setTimeout(() => {
+        connectWebSocket();
+      }, 500);
+      
+      return () => {
+        clearTimeout(reconnectTimer);
+      };
     }
     
     // Cleanup function to close WebSocket connection
     return () => {
       if (ws.current) {
-        ws.current.close();
+        try {
+          ws.current.close();
+        } catch (e) {
+          console.error("Error closing WebSocket connection:", e);
+        }
       }
     };
   }, [connectWebSocket, isMounted, currentMode]);
-
-  // Auto-scroll to bottom when messages change
-  useEffect(() => {
-    scrollToBottom(messagesEndRef);
-  }, [messages]);
 
   // Handle key down event for input
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -352,12 +500,86 @@ export function ChatInterface() {
       setInput('');
       setIsProcessing(true);
       
+      // Add the user message to the UI immediately
+      const userMessage = {
+        id: messageId,
+        text: parsedText,
+        sender: 'user' as const,
+        timestamp: new Date(),
+        mode: currentMode,
+      };
+      
+      setMessages((prevMessages) => {
+        const updatedMessages = [...prevMessages, userMessage];
+        // Store in localStorage for persistence
+        try {
+          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
+        } catch (e) {
+          console.error("Error storing messages in localStorage:", e);
+        }
+        return updatedMessages;
+      });
+      
+      // Set a timeout to handle case where server doesn't respond
+      const responseTimeout = setTimeout(() => {
+        if (isProcessing) {
+          setIsProcessing(false);
+          
+          // Add an error message if we haven't received a response
+          const timeoutMessage = {
+            id: uuidv4(),
+            text: "I'm sorry, the server took too long to respond. Please try again or refresh the page if the problem persists.",
+            sender: 'assistant' as const,
+            timestamp: new Date(),
+            mode: currentMode,
+          };
+          
+          setMessages((prevMessages) => {
+            const updatedMessages = [...prevMessages, timeoutMessage];
+            try {
+              localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
+            } catch (e) {
+              console.error("Error storing messages in localStorage:", e);
+            }
+            return updatedMessages;
+          });
+          
+          // Try to reconnect the WebSocket
+          if (ws.current?.readyState !== WebSocket.OPEN) {
+            connectWebSocket();
+          }
+        }
+      }, 30000);
+      
+      // Store timeout ID to clear it if we get a response
+      ws.current.responseTimeout = responseTimeout;
+      
       // Focus the input after sending
       if (inputRef.current) {
         inputRef.current.focus();
       }
     } catch (error) {
       console.error('Error sending message:', error);
+      setIsProcessing(false);
+      
+      // Add an error message if sending fails
+      const errorMessage = {
+        id: uuidv4(),
+        text: "There was an error sending your message. Please try again.",
+        sender: 'assistant' as const,
+        timestamp: new Date(),
+        mode: currentMode,
+      };
+      
+      setMessages((prevMessages) => {
+        const updatedMessages = [...prevMessages, errorMessage];
+        try {
+          localStorage.setItem('tldraw-chat-messages', JSON.stringify(updatedMessages));
+        } catch (e) {
+          console.error("Error storing messages in localStorage:", e);
+        }
+        return updatedMessages;
+      });
     }
   };
 
@@ -618,9 +840,9 @@ export function ChatInterface() {
                           
                           {/* Display agent details if this is the last assistant message and we have details */}
                           {message.mode === 'create' && 
-                          message.sender === 'assistant' && 
-                          agentDetails && 
-                          agentDetails.id === message.id && (
+                           message.sender === 'assistant' && 
+                           agentDetails && 
+                           agentDetails.id === message.id && (
                             <div className="mt-3 pt-2 border-t border-gray-200 text-xs text-gray-600">
                               <details>
                                 <summary className="cursor-pointer font-medium text-blue-600 hover:text-blue-700">
@@ -629,7 +851,7 @@ export function ChatInterface() {
                                 <div className="mt-2 space-y-3 bg-white p-3 rounded-md border border-gray-200 shadow-sm">
                                   <div>
                                     <h4 className="font-semibold mb-1 text-gray-700">Enhanced Prompt</h4>
-                                    <p className="text-gray-600">{agentDetails.enhancedPrompt}</p>
+                                    <p className="text-gray-600">{agentDetails.enhanced_prompt}</p>
                                   </div>
                                   <div>
                                     <h4 className="font-semibold mb-1 text-gray-700">Research</h4>
@@ -642,6 +864,22 @@ export function ChatInterface() {
                                   <div>
                                     <h4 className="font-semibold mb-1 text-gray-700">Drawing Instructions</h4>
                                     <p className="text-gray-600">{agentDetails.instructions}</p>
+                                  </div>
+                                  <div className="mt-2">
+                                    <button 
+                                      className="text-blue-600 hover:text-blue-800 text-sm font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded transition-colors"
+                                      onClick={() => {
+                                        // Attempt to redraw diagram from the saved instructions
+                                        if (agentDetails) {
+                                          generateDiagramFromInstructions({
+                                            visualization: agentDetails.visualization,
+                                            instructions: agentDetails.instructions
+                                          });
+                                        }
+                                      }}
+                                    >
+                                      Redraw Diagram
+                                    </button>
                                   </div>
                                 </div>
                               </details>
@@ -670,7 +908,7 @@ export function ChatInterface() {
       </div>
       
       <div className="p-3 border-t bg-white">
-        {renderCommandPalette()}
+        {isMounted && renderCommandPalette()}
         <div className="flex items-center gap-2 bg-gray-50 p-1 rounded-full shadow-sm">
           {isMounted && (
             <input
@@ -688,18 +926,20 @@ export function ChatInterface() {
               disabled={isProcessing}
             />
           )}
-          <Button 
-            onClick={isMounted ? (isConnected ? handleSend : () => sendMessageREST(input)) : undefined}
-            type="button"
-            className="rounded-full h-9 w-9 p-0 bg-blue-500 hover:bg-blue-600"
-            disabled={!isMounted || !input.trim() || isProcessing}
-          >
-            {isProcessing ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </Button>
+          {isMounted && (
+            <Button 
+              onClick={isConnected ? handleSend : () => sendMessageREST(input)}
+              type="button"
+              className="rounded-full h-9 w-9 p-0 bg-blue-500 hover:bg-blue-600"
+              disabled={!input.trim() || isProcessing}
+            >
+              {isProcessing ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </div>

@@ -96,15 +96,15 @@ class AIService:
             models.extend([
                 {
                     "provider": "gemini",
-                    "id": "gemini-1.5-pro",
-                    "name": "Gemini 1.5 Pro",
-                    "description": "Google's advanced multimodal model with strong reasoning capabilities"
+                    "id": "gemini-2.0-pro",
+                    "name": "Gemini 2.0 Pro",
+                    "description": "Google's advanced multimodal model with improved reasoning capabilities"
                 },
                 {
                     "provider": "gemini",
-                    "id": "gemini-1.5-flash",
-                    "name": "Gemini 1.5 Flash",
-                    "description": "Faster, more efficient Gemini model for quicker responses"
+                    "id": "gemini-2.0-flash",
+                    "name": "Gemini 2.0 Flash",
+                    "description": "Faster, more efficient Gemini 2.0 model for quicker responses"
                 }
             ])
         
@@ -229,8 +229,16 @@ class AIService:
     async def _get_gemini_response(self, messages: List[Dict[str, Any]], model: str) -> str:
         """Get response from Gemini API"""
         try:
+            # Make sure model name is correct
+            if not model.startswith("models/"):
+                model_name = f"models/{model}"
+            else:
+                model_name = model
+                
+            logger.debug(f"Initializing Gemini model: {model_name}")
+            
             # Initialize Gemini model
-            gemini_model = self.gemini.GenerativeModel(model)
+            gemini_model = self.gemini.GenerativeModel(model_name)
             
             # Create chat session
             chat = gemini_model.start_chat(history=messages[:-1])

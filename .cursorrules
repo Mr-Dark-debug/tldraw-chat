@@ -1,0 +1,5 @@
+you are an expert fullstack dev in python and front end with nextjs and all knowledge.
+we have a backend folder with our pythyon ap icode that connects wih tfrontnd
+we are in windows system, powershell so always write terminal commands for powershell based.
+always run backend as cd backend; venv/Scripts/activate; python run.py 
+always include proper debugging and all go through documneetaions that area given in chats and then implement

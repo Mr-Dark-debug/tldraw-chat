@@ -9,7 +9,8 @@ import google.generativeai as genai
 import requests
 from ai_service import ai_service
 from enum import Enum
-from groq import Client
+from groq import AsyncGroq as GroqClient
+from web_search_service import web_search_service
 
 # Load environment variables
 load_dotenv()
@@ -84,14 +85,20 @@ class OpenAIProvider(BaseAIProvider):
             raise
 
 class GeminiProvider(BaseAIProvider):
-    def __init__(self, model: str = "gemini-pro", max_tokens: int = 1000):
+    def __init__(self, model: str = "gemini-1.5-pro", max_tokens: int = 1000):
         super().__init__(model, max_tokens)
         self.genai = google.generativeai
-        self.genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        self.genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
         
     async def generate(self, prompt: str) -> str:
         try:
-            model = self.genai.GenerativeModel(model_name=self.model)
+            # Make sure model name is correct
+            model_name = self.model
+            if not model_name.startswith("models/"):
+                model_name = f"models/{model_name}"
+                
+            logger.debug(f"Initializing Gemini model: {model_name}")
+            model = self.genai.GenerativeModel(model_name=model_name)
             response = model.generate_content(prompt)
             return response.text
         except Exception as e:
@@ -101,7 +108,13 @@ class GeminiProvider(BaseAIProvider):
     async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
         """Generate a streaming response from Gemini"""
         try:
-            model = self.genai.GenerativeModel(model_name=self.model)
+            # Make sure model name is correct
+            model_name = self.model
+            if not model_name.startswith("models/"):
+                model_name = f"models/{model_name}"
+                
+            logger.debug(f"Initializing Gemini model for streaming: {model_name}")
+            model = self.genai.GenerativeModel(model_name=model_name)
             response = model.generate_content(prompt, stream=True)
             for chunk in response:
                 if chunk.text:
@@ -113,11 +126,11 @@ class GeminiProvider(BaseAIProvider):
 class GroqProvider(BaseAIProvider):
     def __init__(self, model: str = "llama3-70b-8192", max_tokens: int = 1000):
         super().__init__(model, max_tokens)
-        self.client = groq.Client(api_key=os.getenv("GROQ_API_KEY"))
+        self.client = GroqClient(api_key=os.getenv("GROQ_API_KEY"))
         
     async def generate(self, prompt: str) -> str:
         try:
-            completion = self.client.chat.completions.create(
+            completion = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 max_tokens=self.max_tokens
@@ -130,13 +143,13 @@ class GroqProvider(BaseAIProvider):
     async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
         """Generate a streaming response from Groq"""
         try:
-            completion = self.client.chat.completions.create(
+            completion = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 max_tokens=self.max_tokens,
                 stream=True
             )
-            for chunk in completion:
+            async for chunk in completion:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except Exception as e:
@@ -173,15 +186,34 @@ class Agent:
         try:
             context = self.memory if use_memory else []
             
+            logger.debug(f"Generating text using provider: {self.provider}, model: {self.model}")
+            
             provider_instance = None
             if self.provider == AIProvider.OPENAI:
+                logger.debug("Using OpenAIProvider")
                 provider_instance = OpenAIProvider(self.model)
             elif self.provider == AIProvider.GEMINI:
+                logger.debug("Using GeminiProvider")
+                # Check if Gemini API key is available
+                gemini_api_key = os.getenv("GEMINI_API_KEY")
+                if not gemini_api_key:
+                    logger.error("GEMINI_API_KEY environment variable is not set!")
+                    return "Error: GEMINI_API_KEY is not configured. Please set this environment variable."
                 provider_instance = GeminiProvider(self.model)
             elif self.provider == AIProvider.GROQ:
+                logger.debug("Using GroqProvider")
+                # Check if Groq API key is available
+                groq_api_key = os.getenv("GROQ_API_KEY")
+                if not groq_api_key:
+                    logger.error("GROQ_API_KEY environment variable is not set!")
+                    return "Error: GROQ_API_KEY is not configured. Please set this environment variable."
                 provider_instance = GroqProvider(self.model)
             else:
+                logger.debug("Using default GroqProvider")
                 provider_instance = GroqProvider(self.model)  # Default to Groq
+            
+            # Log the actual model being used
+            logger.info(f"Using model: {provider_instance.model} with provider: {self.provider.value}")
             
             response = await provider_instance.generate(prompt)
             
@@ -192,7 +224,7 @@ class Agent:
             
             return response
         except Exception as e:
-            logger.error(f"Error in generate_text: {e}")
+            logger.error(f"Error in generate_text: {e}", exc_info=True)  # Add full traceback
             return f"Error generating text: {str(e)}"
 
 class PromptEnhancerAgent(Agent):
@@ -203,14 +235,21 @@ class PromptEnhancerAgent(Agent):
     
     async def enhance_prompt(self, prompt: str) -> str:
         system_prompt = """
-        You are a prompt enhancement specialist. Your job is to take a user's initial query or prompt and make it more specific, detailed, and effective.
-        Consider adding:
-        - More specific details and requirements
-        - Context that might be helpful
-        - Clarifications to prevent misunderstandings
-        - Structure to guide the response format
+        You are a specialized prompt enhancement agent with expertise in improving user requests. Your task is to:
         
-        Enhance the prompt but maintain the original intent. Return ONLY the enhanced prompt without explanations or notes.
+        1. Analyze the initial user prompt carefully to understand the core intent
+        2. Expand the prompt with relevant specifics and context the user might have implied but not stated
+        3. Add structural elements that will guide the AI's response format 
+        4. Clarify any ambiguities in the original prompt
+        5. Include appropriate constraints and parameters
+        
+        For drawing/visualization requests, add specific details about:
+        - Visual elements to include
+        - Spatial relationships between elements
+        - Preferred style, color schemes, or aesthetic direction
+        - Level of detail desired
+        
+        Return ONLY the enhanced prompt without explanations or commentary. Your output will be sent directly to the model.
         """
         
         enhanced_prompt = await self.generate_text(
@@ -228,16 +267,73 @@ class ResearchAgent(Agent):
     
     async def research(self, topic: str) -> str:
         system_prompt = """
-        You are a research specialist. Your task is to provide a comprehensive and factual summary on the given topic.
-        Include:
-        - Key facts and information
-        - Different perspectives if applicable
-        - Recent developments if relevant
-        - Organized structure with clear sections
-        
-        Base your research on established facts and reliable information. Be thorough but concise.
+        You are a specialized research agent with extensive knowledge across domains. Your purpose is to provide accurate, comprehensive information relevant to the user's query.
+
+        For each query:
+        1. Identify the key concepts, terms, and relationships that need exploration
+        2. Provide factual, well-structured information from your knowledge base
+        3. Cover multiple perspectives and approaches where applicable
+        4. Prioritize depth and accuracy over breadth when the topic is specific
+        5. For visualization or drawing requests, include relevant technical knowledge, styles, or conventions
+
+        Your research will be used as context for creating diagrams, visualizations, or instructional content. Focus on providing information that would be helpful for creating visual representations or explanations.
+
+        Format your response with clear sections, using headers where appropriate, and ensuring information flows logically from fundamental to advanced concepts.
         """
         
+        # Check if web search service is available and try to use it
+        web_search_results = None
+        try:
+            # Perform web search
+            web_search_results = await web_search_service.search_for_diagram(topic)
+            logger.info(f"Web search completed for topic: {topic}")
+            
+            # Make sure we have a valid response dictionary
+            if (web_search_results and 
+                isinstance(web_search_results, dict) and 
+                web_search_results.get("success", False)):
+                
+                # Extract relevant information
+                text_results = web_search_results.get("results", [])
+                images = web_search_results.get("images", [])
+                
+                # Create additional context from web search
+                web_context = "### Web Research Results:\n\n"
+                
+                # Add text results
+                if text_results and isinstance(text_results, list):
+                    web_context += "#### Text Information:\n"
+                    for i, result in enumerate(text_results[:5]):  # Limit to top 5 results
+                        if isinstance(result, dict):
+                            title = result.get("title", f"Source {i+1}")
+                            content = result.get("content", "No content available")
+                            url = result.get("url", "")
+                            web_context += f"**{title}**\n{content}\nSource: {url}\n\n"
+                
+                # Add image information
+                if images and isinstance(images, list):
+                    web_context += "#### Related Images Found:\n"
+                    for i, image in enumerate(images[:5]):  # Limit to top 5 images
+                        if isinstance(image, dict):
+                            url = image.get("url", "")
+                            alt_text = image.get("alt_text", f"Image {i+1}")
+                            web_context += f"Image {i+1}: {alt_text}\nURL: {url}\n\n"
+                
+                # Enhance system prompt with web search results
+                enhanced_system_prompt = f"{system_prompt}\n\n{web_context}\n\nIncorporate these web search results into your research summary where relevant. Describe any relevant diagrams or visualizations from the images found."
+                
+                # Generate research with web-enhanced prompt
+                research_result = await self.generate_text(
+                    f"{enhanced_system_prompt}\n\nResearch topic: {topic}\n\nResearch summary:",
+                    use_memory=True
+                )
+                
+                return research_result
+        except Exception as e:
+            logger.error(f"Error in web search during research: {e}")
+            # Fall back to standard research without web search
+        
+        # Default research without web search if not available or if there was an error
         research_result = await self.generate_text(
             f"{system_prompt}\n\nResearch topic: {topic}\n\nResearch summary:",
             use_memory=True
@@ -253,19 +349,73 @@ class VisualizationAgent(Agent):
     
     async def generate_visualization_instruction(self, data_description: str) -> str:
         system_prompt = """
-        You are a data visualization specialist. Your task is to suggest the best visualization approach for the described data.
-        Provide:
-        - Recommended chart or graph type
-        - Explanation of why this visualization works best
-        - Key elements to include in the visualization
-        - Color scheme recommendations if appropriate
-        - Tools that could be used to create this visualization
+        You are a specialized visualization design agent with expertise in creating effective visual representations. Your role is to:
+
+        1. Analyze the user's request and determine the most appropriate visualization approach
+        2. Provide specific, actionable guidance on creating the visualization
+        3. Consider principles of visual design, information hierarchy, and cognitive processing
+        4. Recommend specific visual elements, layout, and composition
+        5. Suggest color schemes that enhance understanding and accessibility
         
-        Focus on clarity, effectiveness, and best practices in data visualization.
+        For TLDraw specifically, focus on:
+        - Simple shapes, connectors, and text elements available in the drawing tool
+        - Logical organization of elements with clear spatial relationships
+        - Appropriate use of color, size, and positioning to convey hierarchy
+        - Practical instructions that can be implemented using basic drawing tools
+        
+        Your output should be comprehensive enough that someone could follow it to create an effective visualization from scratch, with specific guidance about positioning, sizes, colors, and relationships between elements.
         """
         
+        # Check if web search service is available and try to use it
+        web_search_results = None
+        visualization_prompt = system_prompt
+        try:
+            # Create a more specific query for diagram examples
+            diagram_query = f"{data_description} diagram visualization examples color scheme"
+            
+            # Perform web search
+            web_search_results = await web_search_service.search(diagram_query, search_depth="advanced", include_images=True)
+            logger.info(f"Web search completed for visualization: {diagram_query}")
+            
+            # Make sure we have a valid response dictionary
+            if (web_search_results and 
+                isinstance(web_search_results, dict) and 
+                web_search_results.get("success", False)):
+                
+                # Extract images
+                images = web_search_results.get("images", [])
+                text_results = web_search_results.get("results", [])
+                
+                # Create additional context from web search
+                web_context = "### Web Research for Visualization:\n\n"
+                
+                # Add text results about visualization principles
+                if text_results and isinstance(text_results, list):
+                    web_context += "#### Visualization References:\n"
+                    for i, result in enumerate(text_results[:3]):  # Limit to top 3 results
+                        if isinstance(result, dict):
+                            title = result.get("title", f"Source {i+1}")
+                            content = result.get("content", "No content available")
+                            url = result.get("url", "")
+                            web_context += f"**{title}**\n{content}\nSource: {url}\n\n"
+                
+                # Add image descriptions for inspiration
+                if images and isinstance(images, list):
+                    web_context += "#### Reference Visualizations Found Online:\n"
+                    for i, image in enumerate(images[:5]):  # Limit to top 5 images
+                        if isinstance(image, dict):
+                            url = image.get("url", "")
+                            alt_text = image.get("alt_text", f"Diagram {i+1}")
+                            web_context += f"Reference Diagram {i+1}: {alt_text}\nURL: {url}\n\n"
+                
+                visualization_prompt = f"{system_prompt}\n\n{web_context}\n\nUse these reference visualizations as inspiration for your recommendations. Adapt color schemes, layouts, and design elements from these examples where appropriate for the TLDraw environment. Be specific about colors (include hex codes), proportions, and spatial arrangements."
+        except Exception as e:
+            logger.error(f"Error in web search during visualization: {e}")
+            # Fall back to standard visualization without web search
+            
+        # Generate visualization instructions
         visualization_instruction = await self.generate_text(
-            f"{system_prompt}\n\nData description: {data_description}\n\nVisualization recommendation:",
+            f"{visualization_prompt}\n\nVisualization request: {data_description}\n\nVisualization recommendation:",
             use_memory=True
         )
         
@@ -279,19 +429,77 @@ class InstructionAgent(Agent):
     
     async def generate_instructions(self, task: str) -> str:
         system_prompt = """
-        You are an instruction specialist. Your task is to break down a complex task into clear, step-by-step instructions.
-        Provide:
-        - A numbered list of steps in logical order
-        - Clear, concise language for each step
-        - Warnings or notes for potentially confusing steps
-        - Required materials or prerequisites at the beginning
-        - Estimated time to complete (if applicable)
+        You are a specialized instruction agent for TLDraw, a simple drawing tool. Your purpose is to provide clear, step-by-step instructions for creating diagrams, illustrations, or visual representations.
+
+        For each drawing task:
+        1. Break down the creation process into clear, sequential steps
+        2. Start with the basic structure or layout and progress to details
+        3. Provide specific guidance on placement, size, and relationships between elements
+        4. Include color recommendations, styling suggestions, and text placement where appropriate
+        5. Ensure instructions are easy to follow for users with basic drawing skills
         
-        Make your instructions easy to follow for someone who is unfamiliar with the task.
+        Format your instructions as a numbered list with descriptive headings for major sections. Include a brief introduction explaining the overall approach, and conclude with any finishing touches or refinements.
+        
+        Remember that TLDraw has simple tools for:
+        - Creating basic shapes (rectangles, circles, triangles)
+        - Drawing lines and arrows
+        - Adding text
+        - Using color
+        - Grouping elements
+        
+        Optimize your instructions for these basic capabilities rather than advanced graphic design features.
         """
         
+        # Check if web search service is available and try to use it
+        web_search_results = None
+        instruction_prompt = system_prompt
+        try:
+            # Create a more specific query for drawing tutorials
+            drawing_query = f"how to draw {task} diagram step by step tutorial"
+            
+            # Perform web search
+            web_search_results = await web_search_service.search(drawing_query, search_depth="advanced", include_images=True)
+            logger.info(f"Web search completed for drawing instructions: {drawing_query}")
+            
+            # Make sure we have a valid response dictionary
+            if (web_search_results and 
+                isinstance(web_search_results, dict) and 
+                web_search_results.get("success", False)):
+                
+                # Extract results
+                text_results = web_search_results.get("results", [])
+                images = web_search_results.get("images", [])
+                
+                # Create additional context from web search
+                web_context = "### Web Research for Drawing Instructions:\n\n"
+                
+                # Add text results about step-by-step tutorials
+                if text_results and isinstance(text_results, list):
+                    web_context += "#### Drawing Tutorials Found:\n"
+                    for i, result in enumerate(text_results[:3]):  # Limit to top 3 results
+                        if isinstance(result, dict):
+                            title = result.get("title", f"Tutorial {i+1}")
+                            content = result.get("content", "No content available")
+                            url = result.get("url", "")
+                            web_context += f"**{title}**\n{content}\nSource: {url}\n\n"
+                
+                # Add image descriptions for reference
+                if images and isinstance(images, list):
+                    web_context += "#### Reference Images for Drawing Process:\n"
+                    for i, image in enumerate(images[:3]):  # Limit to top 3 images
+                        if isinstance(image, dict):
+                            url = image.get("url", "")
+                            alt_text = image.get("alt_text", f"Drawing Example {i+1}")
+                            web_context += f"Drawing Example {i+1}: {alt_text}\nURL: {url}\n\n"
+                
+                instruction_prompt = f"{system_prompt}\n\n{web_context}\n\nIncorporate helpful techniques from these tutorials into your drawing instructions. Be specific about colors (include hex codes where possible), proportions, and step-by-step guidance tailored for TLDraw's capabilities."
+        except Exception as e:
+            logger.error(f"Error in web search during instruction generation: {e}")
+            # Fall back to standard instructions without web search
+            
+        # Generate instructions
         instructions = await self.generate_text(
-            f"{system_prompt}\n\nTask to break down: {task}\n\nStep-by-step instructions:",
+            f"{instruction_prompt}\n\nDrawing task: {task}\n\nStep-by-step instructions:",
             use_memory=True
         )
         
@@ -312,12 +520,19 @@ class CoordinatorAgent(Agent):
     async def process_request(self, user_request: str) -> str:
         # Determine the best agent for the task
         analysis_prompt = f"""
-        Analyze this user request and determine which specialized agent would best handle it.
-        Options:
-        1. Research Agent - For requests needing factual information and summaries
-        2. Visualization Agent - For requests about data visualization
-        3. Instruction Agent - For requests needing step-by-step guidance
-        4. None - If I should handle this directly
+        You are a coordinator agent responsible for routing user requests to the most appropriate specialized agent.
+        
+        Analyze this user request carefully and determine which specialized agent would best handle it:
+        
+        1. Research Agent - For requests requiring factual information, background knowledge, or domain expertise
+        2. Visualization Agent - For requests about visual design, diagram layout, or data visualization principles
+        3. Instruction Agent - For requests needing step-by-step guidance on creating a drawing or diagram
+        4. None - If you should handle this directly as a general assistant
+        
+        Consider:
+        - The primary intent of the user's request
+        - What specialized knowledge would best serve this request
+        - Whether the user is asking for information, visualization guidance, or specific instructions
         
         User request: "{user_request}"
         
@@ -336,7 +551,7 @@ class CoordinatorAgent(Agent):
         # Enhanced prompt for better results
         enhanced_request = await self.prompt_enhancer.enhance_prompt(user_request)
         
-        # Route to appropriate agent
+        # Route to appropriate agent based on the analysis
         if agent_choice == "1":
             response = await self.researcher.research(enhanced_request)
         elif agent_choice == "2":
@@ -344,10 +559,20 @@ class CoordinatorAgent(Agent):
         elif agent_choice == "3":
             response = await self.instructor.generate_instructions(enhanced_request)
         else:
-            # Handle directly
+            # Handle directly with a comprehensive general assistant prompt
             system_prompt = """
-            You are a helpful AI assistant. Provide a clear, informative, and friendly response to the user's request.
+            You are a helpful AI assistant skilled in providing clear, concise, and accurate responses.
+            
+            When responding to the user:
+            1. Provide direct, actionable information
+            2. Use a friendly, conversational tone
+            3. When appropriate, organize information with bullet points or numbered lists
+            4. Include relevant context without being overly verbose
+            5. If the request is ambiguous, address the most likely interpretation first
+            
+            Focus on delivering maximum value and clarity in your response.
             """
+            
             response = await self.generate_text(
                 f"{system_prompt}\n\nUser request: {enhanced_request}\n\nResponse:",
                 use_memory=True
@@ -359,16 +584,107 @@ class AgentSystem:
     """Main class for managing the agent system"""
     
     def __init__(self, provider: AIProvider = AIProvider.GROQ, model: Optional[str] = None):
+        # Initialize all agents with appropriate providers and models
         self.coordinator = CoordinatorAgent(provider, model)
+        self.prompt_enhancer = PromptEnhancerAgent(provider, model)
+        self.researcher = ResearchAgent(provider, model)
+        self.visualizer = VisualizationAgent(provider, model)
+        self.instructor = InstructionAgent(provider, model)
+        
+        # Set default models based on their best capabilities
+        if provider == AIProvider.GROQ:
+            # Groq models have different specialties
+            self.prompt_enhancer.model = "llama3-8b-8192"  # Smaller model for simple prompt enhancement
+            self.researcher.model = "llama3-70b-8192"      # Larger model for research
+            self.visualizer.model = "llama3-70b-8192"      # Larger model for visualization
+            self.instructor.model = "llama3-8b-8192"       # Smaller model for instructions
+            self.coordinator.model = "llama3-70b-8192"     # Larger model for coordination
+        elif provider == AIProvider.GEMINI:
+            # Gemini models - using updated model names
+            self.prompt_enhancer.model = "gemini-1.5-flash"  # Fast model for simple enhancement
+            self.researcher.model = "gemini-1.5-pro"         # Pro model for research
+            self.visualizer.model = "gemini-1.5-pro"         # Pro model for visualization
+            self.instructor.model = "gemini-1.5-flash"       # Fast model for instructions
+            self.coordinator.model = "gemini-1.5-pro"        # Pro model for coordination
     
-    async def process_message(self, message: str) -> str:
+    async def process_message(self, message: str) -> Dict[str, str]:
+        """
+        Process a message through the agent system and return the full context
+        
+        Returns:
+            Dictionary with all processing stages and results
+        """
         try:
-            response = await self.coordinator.process_request(message)
-            return response
+            logger.info(f"Starting agent processing for message: {message[:50]}...")
+            
+            # Step 1: Enhance the prompt
+            logger.info("Step 1: Enhancing prompt...")
+            try:
+                enhanced_prompt = await self.prompt_enhancer.enhance_prompt(message)
+                logger.info("Prompt enhancement completed")
+            except Exception as e:
+                logger.error(f"Error in prompt enhancement: {e}")
+                enhanced_prompt = f"Error processing prompt: {str(e)}"
+            
+            # Step 2: Research related information
+            logger.info("Step 2: Researching information...")
+            try:
+                research_info = await self.researcher.research(message)
+                logger.info("Research completed")
+            except Exception as e:
+                logger.error(f"Error in research: {e}")
+                research_info = f"Could not complete research due to an error: {str(e)}"
+            
+            # Step 3: Generate visualization suggestions
+            logger.info("Step 3: Generating visualization suggestions...")
+            try:
+                visualization = await self.visualizer.generate_visualization_instruction(message)
+                logger.info("Visualization generation completed")
+            except Exception as e:
+                logger.error(f"Error in visualization: {e}")
+                visualization = f"Could not generate visualization due to an error: {str(e)}"
+            
+            # Step 4: Generate instructions for TLDraw
+            logger.info("Step 4: Generating drawing instructions...")
+            try:
+                instructions = await self.instructor.generate_instructions(message)
+                logger.info("Instruction generation completed")
+            except Exception as e:
+                logger.error(f"Error in instruction generation: {e}")
+                instructions = f"Could not generate instructions due to an error: {str(e)}"
+            
+            # Step 5: Generate final response from coordinator
+            logger.info("Step 5: Generating final response...")
+            try:
+                response = await self.coordinator.process_request(message)
+                logger.info("Final response generation completed")
+            except Exception as e:
+                logger.error(f"Error in final response generation: {e}")
+                response = f"I'm sorry, but I encountered an error processing your request. The system may be experiencing issues with one or more AI providers. Please try again later. Error: {str(e)}"
+            
+            logger.info("Agent processing completed successfully")
+            
+            # Return all stages of processing
+            return {
+                "original_message": message,
+                "enhanced_prompt": enhanced_prompt,
+                "research": research_info,
+                "visualization": visualization,
+                "instructions": instructions,
+                "response": response
+            }
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-            return f"I encountered an error while processing your request: {str(e)}"
-    
+            error_msg = f"Error processing message: {str(e)}"
+            return {
+                "original_message": message,
+                "enhanced_prompt": f"Error processing prompt: {str(e)}",
+                "research": "Could not complete research due to an error.",
+                "visualization": "Could not generate visualization due to an error.",
+                "instructions": "Could not generate instructions due to an error.",
+                "response": "I'm sorry, but I encountered an error processing your request. The system may be experiencing issues with one or more AI providers. Please try again later."
+            }
+        
     def get_available_models(self) -> List[Dict[str, Any]]:
         """Get available models from AI service"""
         return ai_service.get_models()
@@ -449,7 +765,8 @@ class AgentSystem:
             
             # Process the request based on agent type
             if agent_type == "prompt_enhancer":
-                enhanced_prompt = await self.coordinator.prompt_enhancer.enhance_prompt(prompt)
+                # Access the prompt_enhancer directly, not through coordinator
+                enhanced_prompt = await self.prompt_enhancer.enhance_prompt(prompt)
                 logger.info(f"Enhanced prompt: {enhanced_prompt}")
                 
                 # Stream response from provider
@@ -462,24 +779,46 @@ class AgentSystem:
                     yield chunk
                     
             elif agent_type == "research":
-                # Research agent might need special handling for streaming
-                research_result = await self.coordinator.researcher.research(prompt)
+                # Research agent - access directly
+                research_result = await self.researcher.research(prompt)
                 if websocket:
                     await websocket.send_json({
                         "type": "response",
                         "content": research_result
                     })
                 yield research_result
+                
+            elif agent_type == "visualization":
+                # Visualization agent - access directly
+                vis_result = await self.visualizer.generate_visualization_instruction(prompt)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "response",
+                        "content": vis_result
+                    })
+                yield vis_result
+                
+            elif agent_type == "instruction":
+                # Instruction agent - access directly
+                inst_result = await self.instructor.generate_instructions(prompt)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "response",
+                        "content": inst_result
+                    })
+                yield inst_result
                     
             else:
-                # Default agent processing
-                async for chunk in provider_instance.generate_stream(prompt):
-                    if websocket:
-                        await websocket.send_json({
-                            "type": "chunk",
-                            "content": chunk
-                        })
-                    yield chunk
+                # Default agent processing - use the full process_message flow
+                results = await self.process_message(prompt)
+                response = results["response"]
+                
+                if websocket:
+                    await websocket.send_json({
+                        "type": "full_response",
+                        "content": results
+                    })
+                yield response
                     
         except Exception as e:
             error_message = f"Error in agent system: {str(e)}"
